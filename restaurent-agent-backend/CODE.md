@@ -1,10 +1,10 @@
 # Restaurant Assistant Backend
 
-FastAPI backend: an OpenAI agent (LangChain) with restaurant tools, traced with LangSmith.
+FastAPI backend: an OpenAI tool-calling agent (official `openai` SDK) with restaurant tools.
 
 Endpoints: `POST /chat` and `GET /health`. Run: `uvicorn main:app --reload`.
 
-Environment variables (set in `.env` locally or in the host's settings; never commit them): `OPENAI_API_KEY`, `CORS_ORIGINS`, `LANGSMITH_TRACING`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT`.
+Environment variables (set in `.env` locally or in the host's settings; never commit them): `OPENAI_API_KEY`, `CORS_ORIGINS`.
 
 ## main.py
 
@@ -19,12 +19,10 @@ load_dotenv()
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from langchain.agents import create_agent
-from langchain.chat_models import init_chat_model
-from langsmith import traceable
+from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
 
-from tools import tools
+from tools import run_tool, tools
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -49,15 +47,10 @@ your available capabilities.
 Be friendly, conversational, and concise.
 """
 
-model = init_chat_model(
-    os.getenv("MODEL", "openai:gpt-4o-mini")
-)
+MODEL = os.getenv("MODEL", "gpt-4o-mini")
+MAX_TOOL_ROUNDS = 5
 
-agent = create_agent(
-    model=model,
-    tools=tools,
-    system_prompt=system_prompt,
-)
+client = AsyncOpenAI()  # reads OPENAI_API_KEY from the environment
 
 app = FastAPI(title="Restaurant Assistant API")
 
@@ -84,23 +77,31 @@ class ChatResponse(BaseModel):
     tool_calls: list[dict]
 
 
-def _text(content) -> str:
-    if isinstance(content, str):
-        return content
+async def invoke_agent(messages: list[dict]) -> tuple[str, list[dict]]:
+    """Run the OpenAI tool-calling loop; return (reply, tool_calls)."""
+    convo = [{"role": "system", "content": system_prompt}, *messages]
+    tool_calls: list[dict] = []
 
-    if isinstance(content, list):
-        return "".join(
-            block.get("text", "")
-            for block in content
-            if isinstance(block, dict)
+    for _ in range(MAX_TOOL_ROUNDS):
+        response = await client.chat.completions.create(
+            model=MODEL,
+            messages=convo,
+            tools=tools,
         )
+        msg = response.choices[0].message
 
-    return str(content) if content is not None else ""
+        if not msg.tool_calls:
+            return msg.content or "", tool_calls
 
+        convo.append(msg.model_dump(exclude_none=True))
+        for call in msg.tool_calls:
+            output = run_tool(call.function.name, call.function.arguments)
+            tool_calls.append({"name": call.function.name, "output": output})
+            convo.append(
+                {"role": "tool", "tool_call_id": call.id, "content": output}
+            )
 
-@traceable(name="OpenAI Restaurant Agent", run_type="chain")
-async def invoke_agent(messages: list[dict]):
-    return await agent.ainvoke({"messages": messages})
+    return "Sorry, I could not complete that request.", tool_calls
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -109,7 +110,7 @@ async def chat(req: ChatRequest):
     messages.append({"role": "user", "content": req.message})
 
     try:
-        result = await invoke_agent(messages)
+        reply, tool_calls = await invoke_agent(messages)
     except Exception:
         logger.exception("OpenAI agent invocation failed")
         raise HTTPException(
@@ -117,23 +118,7 @@ async def chat(req: ChatRequest):
             detail="The restaurant assistant could not process your request.",
         )
 
-    out = result["messages"]
-
-    tool_calls = [
-        {
-            "name": m.name,
-            "output": _text(m.content),
-        }
-        for m in out
-        if getattr(m, "type", None) == "tool"
-    ]
-
-    reply = _text(out[-1].content) if out else ""
-
-    return ChatResponse(
-        reply=reply,
-        tool_calls=tool_calls,
-    )
+    return ChatResponse(reply=reply, tool_calls=tool_calls)
 
 
 @app.get("/health")
@@ -144,13 +129,12 @@ async def health():
 ## tools.py
 
 ```python
-from langchain_core.tools import tool
+import json
 
 # ============================================================
 # TOOL 1: Search Restaurants by Cuisine
 # ============================================================
 
-@tool
 def search_restaurants_by_cuisine(cuisine_type: str) -> list:
     """
     Search for restaurants by cuisine type.
@@ -189,7 +173,6 @@ def search_restaurants_by_cuisine(cuisine_type: str) -> list:
 # TOOL 2: Get Restaurant Details
 # ============================================================
 
-@tool
 def get_restaurant_details(restaurant_name: str) -> dict:
     """
     Get detailed information about a restaurant,
@@ -271,7 +254,6 @@ def get_restaurant_details(restaurant_name: str) -> dict:
 # TOOL 3: Check Reservation Availability
 # ============================================================
 
-@tool
 def check_reservation_availability(
     restaurant_name: str,
     date: str,
@@ -340,7 +322,67 @@ def check_reservation_availability(
     )
 
 
-tools = [search_restaurants_by_cuisine, get_restaurant_details, check_reservation_availability]
+# ============================================================
+# OpenAI tool definitions + dispatcher
+# ============================================================
+
+def _schema(fn, properties: dict, required: list) -> dict:
+    return {
+        "type": "function",
+        "function": {
+            "name": fn.__name__,
+            "description": " ".join(fn.__doc__.split()),
+            "parameters": {
+                "type": "object",
+                "properties": properties,
+                "required": required,
+            },
+        },
+    }
+
+
+TOOL_FUNCTIONS = {
+    fn.__name__: fn
+    for fn in (
+        search_restaurants_by_cuisine,
+        get_restaurant_details,
+        check_reservation_availability,
+    )
+}
+
+tools = [
+    _schema(
+        search_restaurants_by_cuisine,
+        {"cuisine_type": {"type": "string"}},
+        ["cuisine_type"],
+    ),
+    _schema(
+        get_restaurant_details,
+        {"restaurant_name": {"type": "string"}},
+        ["restaurant_name"],
+    ),
+    _schema(
+        check_reservation_availability,
+        {
+            "restaurant_name": {"type": "string"},
+            "date": {"type": "string", "description": "YYYY-MM-DD"},
+            "party_size": {"type": "integer"},
+        },
+        ["restaurant_name", "date", "party_size"],
+    ),
+]
+
+
+def run_tool(name: str, arguments: str) -> str:
+    """Execute a tool by name with JSON-encoded arguments; return a string."""
+    fn = TOOL_FUNCTIONS.get(name)
+    if fn is None:
+        return f"Unknown tool '{name}'."
+    try:
+        result = fn(**json.loads(arguments or "{}"))
+    except Exception as exc:
+        return f"Tool '{name}' failed: {exc}"
+    return result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
 ```
 
 ## requirements.txt
@@ -348,10 +390,8 @@ tools = [search_restaurants_by_cuisine, get_restaurant_details, check_reservatio
 ```text
 fastapi
 uvicorn[standard]
-langchain>=1.0
-langchain-openai
+openai
 pydantic
-langsmith
 python-dotenv
 ```
 

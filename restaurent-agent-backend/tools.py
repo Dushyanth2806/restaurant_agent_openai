@@ -1,10 +1,9 @@
-from langchain_core.tools import tool
+import json
 
 # ============================================================
 # TOOL 1: Search Restaurants by Cuisine
 # ============================================================
 
-@tool
 def search_restaurants_by_cuisine(cuisine_type: str) -> list:
     """
     Search for restaurants by cuisine type.
@@ -43,7 +42,6 @@ def search_restaurants_by_cuisine(cuisine_type: str) -> list:
 # TOOL 2: Get Restaurant Details
 # ============================================================
 
-@tool
 def get_restaurant_details(restaurant_name: str) -> dict:
     """
     Get detailed information about a restaurant,
@@ -125,7 +123,6 @@ def get_restaurant_details(restaurant_name: str) -> dict:
 # TOOL 3: Check Reservation Availability
 # ============================================================
 
-@tool
 def check_reservation_availability(
     restaurant_name: str,
     date: str,
@@ -194,4 +191,64 @@ def check_reservation_availability(
     )
 
 
-tools = [search_restaurants_by_cuisine, get_restaurant_details, check_reservation_availability]
+# ============================================================
+# OpenAI tool definitions + dispatcher
+# ============================================================
+
+def _schema(fn, properties: dict, required: list) -> dict:
+    return {
+        "type": "function",
+        "function": {
+            "name": fn.__name__,
+            "description": " ".join(fn.__doc__.split()),
+            "parameters": {
+                "type": "object",
+                "properties": properties,
+                "required": required,
+            },
+        },
+    }
+
+
+TOOL_FUNCTIONS = {
+    fn.__name__: fn
+    for fn in (
+        search_restaurants_by_cuisine,
+        get_restaurant_details,
+        check_reservation_availability,
+    )
+}
+
+tools = [
+    _schema(
+        search_restaurants_by_cuisine,
+        {"cuisine_type": {"type": "string"}},
+        ["cuisine_type"],
+    ),
+    _schema(
+        get_restaurant_details,
+        {"restaurant_name": {"type": "string"}},
+        ["restaurant_name"],
+    ),
+    _schema(
+        check_reservation_availability,
+        {
+            "restaurant_name": {"type": "string"},
+            "date": {"type": "string", "description": "YYYY-MM-DD"},
+            "party_size": {"type": "integer"},
+        },
+        ["restaurant_name", "date", "party_size"],
+    ),
+]
+
+
+def run_tool(name: str, arguments: str) -> str:
+    """Execute a tool by name with JSON-encoded arguments; return a string."""
+    fn = TOOL_FUNCTIONS.get(name)
+    if fn is None:
+        return f"Unknown tool '{name}'."
+    try:
+        result = fn(**json.loads(arguments or "{}"))
+    except Exception as exc:
+        return f"Tool '{name}' failed: {exc}"
+    return result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)

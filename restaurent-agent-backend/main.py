@@ -8,12 +8,10 @@ load_dotenv()
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from langchain.agents import create_agent
-from langchain.chat_models import init_chat_model
-from langsmith import traceable
+from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
 
-from tools import tools
+from tools import run_tool, tools
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -38,15 +36,10 @@ your available capabilities.
 Be friendly, conversational, and concise.
 """
 
-model = init_chat_model(
-    os.getenv("MODEL", "openai:gpt-4o-mini")
-)
+MODEL = os.getenv("MODEL", "gpt-4o-mini")
+MAX_TOOL_ROUNDS = 5
 
-agent = create_agent(
-    model=model,
-    tools=tools,
-    system_prompt=system_prompt,
-)
+client = AsyncOpenAI()  # reads OPENAI_API_KEY from the environment
 
 app = FastAPI(title="Restaurant Assistant API")
 
@@ -73,23 +66,31 @@ class ChatResponse(BaseModel):
     tool_calls: list[dict]
 
 
-def _text(content) -> str:
-    if isinstance(content, str):
-        return content
+async def invoke_agent(messages: list[dict]) -> tuple[str, list[dict]]:
+    """Run the OpenAI tool-calling loop; return (reply, tool_calls)."""
+    convo = [{"role": "system", "content": system_prompt}, *messages]
+    tool_calls: list[dict] = []
 
-    if isinstance(content, list):
-        return "".join(
-            block.get("text", "")
-            for block in content
-            if isinstance(block, dict)
+    for _ in range(MAX_TOOL_ROUNDS):
+        response = await client.chat.completions.create(
+            model=MODEL,
+            messages=convo,
+            tools=tools,
         )
+        msg = response.choices[0].message
 
-    return str(content) if content is not None else ""
+        if not msg.tool_calls:
+            return msg.content or "", tool_calls
 
+        convo.append(msg.model_dump(exclude_none=True))
+        for call in msg.tool_calls:
+            output = run_tool(call.function.name, call.function.arguments)
+            tool_calls.append({"name": call.function.name, "output": output})
+            convo.append(
+                {"role": "tool", "tool_call_id": call.id, "content": output}
+            )
 
-@traceable(name="OpenAI Restaurant Agent", run_type="chain")
-async def invoke_agent(messages: list[dict]):
-    return await agent.ainvoke({"messages": messages})
+    return "Sorry, I could not complete that request.", tool_calls
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -98,7 +99,7 @@ async def chat(req: ChatRequest):
     messages.append({"role": "user", "content": req.message})
 
     try:
-        result = await invoke_agent(messages)
+        reply, tool_calls = await invoke_agent(messages)
     except Exception:
         logger.exception("OpenAI agent invocation failed")
         raise HTTPException(
@@ -106,23 +107,7 @@ async def chat(req: ChatRequest):
             detail="The restaurant assistant could not process your request.",
         )
 
-    out = result["messages"]
-
-    tool_calls = [
-        {
-            "name": m.name,
-            "output": _text(m.content),
-        }
-        for m in out
-        if getattr(m, "type", None) == "tool"
-    ]
-
-    reply = _text(out[-1].content) if out else ""
-
-    return ChatResponse(
-        reply=reply,
-        tool_calls=tool_calls,
-    )
+    return ChatResponse(reply=reply, tool_calls=tool_calls)
 
 
 @app.get("/health")
