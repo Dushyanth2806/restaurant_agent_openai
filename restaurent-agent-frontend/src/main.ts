@@ -5,9 +5,9 @@ import { parseAgentResponse, type AgentResult, type ToolResult } from "./schemas
 /*
  * Backend: restaurent-agent (FastAPI)
  *   POST /chat   { message, history: [{role, content}] }
- *                -> { reply, tool_calls: [{name, output}], jev: {intent, confidence, available} }
+ *                -> { reply, tool_calls: [{name, output}] }
  *   GET  /health -> { status: "ok" }
- * reply = Gemini agent output; jev = TypeSafe classifier output. Both are shown.
+ * reply = OpenAI agent output.
  */
 
 function $<T extends HTMLElement>(id: string): T {
@@ -123,26 +123,9 @@ function renderTool(t: ToolResult): HTMLElement {
   return box;
 }
 
-function renderJev(jev: NonNullable<AgentResult["jev"]>, toolNames: string[]): HTMLElement {
-  const box = el("div", "jev");
-  box.append(el("span", "jev-label", "Jev"));
-  if (!jev.available) {
-    box.append(el("span", "badge bad", "unavailable"));
-    return box;
-  }
-  const pct = jev.confidence === null ? "" : ` · ${Math.round(jev.confidence * 100)}%`;
-  box.append(el("span", "badge", `intent: ${jev.intent}${pct}`));
-  if (toolNames.length) box.append(el("span", "jev-note", `Gemini called ${toolNames.join(", ")}`));
-  return box;
-}
-
 function renderResult(r: AgentResult): void {
   r.tools.forEach((t) => chat.append(renderTool(t)));
   if (r.reply) chat.append(el("div", "msg bot", r.reply));
-  if (r.jev) {
-    chat.append(renderJev(r.jev, r.tools.map((t) => (t.ok ? t.call.name : t.name))));
-    if (showJson.checked) chat.append(jsonBlock({ jev: r.jev }));
-  }
   scrollDown();
 }
 

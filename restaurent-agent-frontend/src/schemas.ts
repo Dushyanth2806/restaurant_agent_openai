@@ -42,19 +42,10 @@ export const ToolCall = z.discriminatedUnion("name", [
 ]);
 export type ToolCall = z.infer<typeof ToolCall>;
 
-// ---- Jev (TypeSafe) classifier result, from jev_decision.py ----
-export const Jev = z.object({
-  intent: z.string(), // search | details | reservation | general | unknown
-  confidence: z.number().nullable(),
-  available: z.boolean(),
-});
-export type Jev = z.infer<typeof Jev>;
-
 // ---- Full /chat response (main.py ChatResponse) ----
 export const ChatResponse = z.object({
   reply: z.string(),
   tool_calls: z.array(z.unknown()),
-  jev: Jev,
 });
 
 export type ToolResult =
@@ -64,7 +55,6 @@ export type ToolResult =
 export type AgentResult = {
   reply: string;
   tools: ToolResult[];
-  jev: Jev | null;
 };
 
 export function parseAgentResponse(input: unknown): AgentResult {
@@ -72,7 +62,7 @@ export function parseAgentResponse(input: unknown): AgentResult {
   const base = ChatResponse.safeParse(input);
   if (!base.success) {
     const text = typeof input === "string" ? input : JSON.stringify(input, null, 2);
-    return { reply: text, tools: [], jev: null };
+    return { reply: text, tools: [] };
   }
   const tools = base.data.tool_calls.map((raw): ToolResult => {
     const parsed = ToolCall.safeParse(raw);
@@ -85,5 +75,5 @@ export function parseAgentResponse(input: unknown): AgentResult {
       issues: parsed.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; "),
     };
   });
-  return { reply: base.data.reply, tools, jev: base.data.jev };
+  return { reply: base.data.reply, tools };
 }

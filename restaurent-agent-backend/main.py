@@ -1,5 +1,4 @@
 ﻿
-import asyncio
 import logging
 import os
 
@@ -15,7 +14,6 @@ from langsmith import traceable
 from pydantic import BaseModel, Field
 
 from tools import tools
-from jev_decision import safe_classify_restaurant_request
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -73,7 +71,6 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     reply: str
     tool_calls: list[dict]
-    jev: dict
 
 
 def _text(content) -> str:
@@ -90,8 +87,8 @@ def _text(content) -> str:
     return str(content) if content is not None else ""
 
 
-@traceable(name="Gemini Restaurant Agent", run_type="chain")
-async def invoke_gemini_agent(messages: list[dict]):
+@traceable(name="OpenAI Restaurant Agent", run_type="chain")
+async def invoke_agent(messages: list[dict]):
     return await agent.ainvoke({"messages": messages})
 
 
@@ -100,20 +97,10 @@ async def chat(req: ChatRequest):
     messages = [m.model_dump() for m in req.history]
     messages.append({"role": "user", "content": req.message})
 
-    # Run both systems independently.
-    gemini_task = invoke_gemini_agent(messages)
-    jev_task = safe_classify_restaurant_request(
-        req.message,
-        [m.model_dump() for m in req.history],
-    )
-
     try:
-        result, jev_result = await asyncio.gather(
-            gemini_task,
-            jev_task,
-        )
+        result = await invoke_agent(messages)
     except Exception:
-        logger.exception("Gemini agent invocation failed")
+        logger.exception("OpenAI agent invocation failed")
         raise HTTPException(
             status_code=502,
             detail="The restaurant assistant could not process your request.",
@@ -135,7 +122,6 @@ async def chat(req: ChatRequest):
     return ChatResponse(
         reply=reply,
         tool_calls=tool_calls,
-        jev=jev_result,
     )
 
 

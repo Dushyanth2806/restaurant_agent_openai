@@ -1,5 +1,4 @@
 /** Offline stand-in for POST /chat. Returns exactly what the real backend returns (tool outputs as strings). */
-import { Jev } from "./schemas";
 
 const RESTAURANTS: Record<string, Array<[string, number, string]>> = {
   indian: [["Spice Palace", 4.5, "₹₹"], ["Curry House", 4.3, "₹₹"], ["Taj Flavors", 4.7, "₹₹₹"]],
@@ -29,7 +28,6 @@ export function demoChat(msg: string): unknown {
   const name = Object.keys(DETAILS).find((n) => lower.includes(n.toLowerCase()));
   const date = msg.match(/\d{4}-\d{2}-\d{2}/)?.[0];
   const party = Number(lower.match(/(\d+)\s*(people|persons|guests|pax)/)?.[1] ?? 2);
-  const jev = (intent: string): Jev => ({ intent, confidence: 0.92, available: true });
 
   if (name && date) {
     const slots = SLOTS[name];
@@ -40,14 +38,12 @@ export function demoChat(msg: string): unknown {
     return {
       reply: ok ? `Good news — ${name} has a table for ${party} on ${date}.` : `Sorry, ${name} is fully booked on ${date}.`,
       tool_calls: [{ name: "check_reservation_availability", output }],
-      jev: jev("reservation"),
     };
   }
   if (name) {
     return {
       reply: `Here are the details for ${name}.`,
       tool_calls: [{ name: "get_restaurant_details", output: JSON.stringify(DETAILS[name]) }],
-      jev: jev("details"),
     };
   }
   const cuisine = Object.keys(RESTAURANTS).find((c) => lower.includes(c));
@@ -56,12 +52,10 @@ export function demoChat(msg: string): unknown {
     return {
       reply: `Here are some ${cuisine} restaurants you might like.`,
       tool_calls: [{ name: "search_restaurants_by_cuisine", output: JSON.stringify(list) }],
-      jev: jev("search"),
     };
   }
   return {
     reply: "I can search by cuisine (Indian, Italian, Chinese, Mexican), show restaurant details, or check reservations. The requested information is outside my capabilities otherwise.",
     tool_calls: [],
-    jev: jev("general"),
   };
 }
