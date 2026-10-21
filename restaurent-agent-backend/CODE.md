@@ -1,16 +1,15 @@
 # Restaurant Assistant Backend
 
-FastAPI backend: a Gemini agent (LangChain) with restaurant tools, plus a Jev (TypeSafe) request classifier that sees the whole conversation, traced with LangSmith.
+FastAPI backend: an OpenAI agent (LangChain) with restaurant tools, traced with LangSmith.
 
 Endpoints: `POST /chat` and `GET /health`. Run: `uvicorn main:app --reload`.
 
-Environment variables (set in `.env` locally or in the host's settings; never commit them): `GOOGLE_API_KEY`, `TYPESAFE_API_KEY`, `CORS_ORIGINS`, `LANGSMITH_TRACING`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT`.
+Environment variables (set in `.env` locally or in the host's settings; never commit them): `OPENAI_API_KEY`, `CORS_ORIGINS`, `LANGSMITH_TRACING`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT`.
 
 ## main.py
 
 ```python
-
-import asyncio
+﻿
 import logging
 import os
 
@@ -26,7 +25,6 @@ from langsmith import traceable
 from pydantic import BaseModel, Field
 
 from tools import tools
-from jev_decision import safe_classify_restaurant_request
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -52,7 +50,7 @@ Be friendly, conversational, and concise.
 """
 
 model = init_chat_model(
-    os.getenv("MODEL", "google_genai:gemini-3.5-flash-lite")
+    os.getenv("MODEL", "openai:gpt-4o-mini")
 )
 
 agent = create_agent(
@@ -84,7 +82,6 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     reply: str
     tool_calls: list[dict]
-    jev: dict
 
 
 def _text(content) -> str:
@@ -101,8 +98,8 @@ def _text(content) -> str:
     return str(content) if content is not None else ""
 
 
-@traceable(name="Gemini Restaurant Agent", run_type="chain")
-async def invoke_gemini_agent(messages: list[dict]):
+@traceable(name="OpenAI Restaurant Agent", run_type="chain")
+async def invoke_agent(messages: list[dict]):
     return await agent.ainvoke({"messages": messages})
 
 
@@ -111,20 +108,10 @@ async def chat(req: ChatRequest):
     messages = [m.model_dump() for m in req.history]
     messages.append({"role": "user", "content": req.message})
 
-    # Run both systems independently.
-    gemini_task = invoke_gemini_agent(messages)
-    jev_task = safe_classify_restaurant_request(
-        req.message,
-        [m.model_dump() for m in req.history],
-    )
-
     try:
-        result, jev_result = await asyncio.gather(
-            gemini_task,
-            jev_task,
-        )
+        result = await invoke_agent(messages)
     except Exception:
-        logger.exception("Gemini agent invocation failed")
+        logger.exception("OpenAI agent invocation failed")
         raise HTTPException(
             status_code=502,
             detail="The restaurant assistant could not process your request.",
@@ -146,7 +133,6 @@ async def chat(req: ChatRequest):
     return ChatResponse(
         reply=reply,
         tool_calls=tool_calls,
-        jev=jev_result,
     )
 
 
@@ -357,77 +343,16 @@ def check_reservation_availability(
 tools = [search_restaurants_by_cuisine, get_restaurant_details, check_reservation_availability]
 ```
 
-## jev_decision.py
-
-```python
-import asyncio
-import logging
-
-from langsmith import traceable
-from typesafe_sdk import AsyncTypeSafeClient, Choice
-
-logger = logging.getLogger(__name__)
-
-
-@traceable(name="Jev Restaurant Classification")
-async def classify_restaurant_request(message: str, history: list[dict] | None = None) -> dict:
-    conversation = "\n".join(
-        f"{m['role']}: {m['content']}" for m in (history or [])
-    )
-    async with AsyncTypeSafeClient() as client:
-        response = await client.system_one(
-            state={"conversation_so_far": conversation, "user_request": message},
-            questions={
-                "intent": Choice(
-                    instructions=(
-                        "Classify what the user wants in their latest request, "
-                        "using the earlier conversation for context."
-                    ),
-                    criteria={
-                        "search": "Search for restaurants",
-                        "details": "Get restaurant details",
-                        "reservation": "Check reservation availability",
-                        "general": "Other questions",
-                    },
-                )
-            },
-        )
-
-    answer = response.answers["intent"]
-
-    return {
-        "intent": answer.choice,
-        "confidence": getattr(answer, "confidence", None),
-        "available": True,
-    }
-
-
-async def safe_classify_restaurant_request(message: str, history: list[dict] | None = None) -> dict:
-    try:
-        return await asyncio.wait_for(
-            classify_restaurant_request(message, history),
-            timeout=10,
-        )
-    except Exception:
-        logger.exception("Jev classification failed")
-        return {
-            "intent": "unknown",
-            "confidence": None,
-            "available": False,
-        }
-```
-
 ## requirements.txt
 
 ```text
 fastapi
 uvicorn[standard]
 langchain>=1.0
-langchain-google-genai
+langchain-openai
 pydantic
 langsmith
 python-dotenv
-typesafe-sdk
 ```
 
 ## .gitignore
