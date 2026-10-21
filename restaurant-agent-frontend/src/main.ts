@@ -3,7 +3,7 @@ import { demoChat } from "./demo";
 import { parseAgentResponse, type AgentResult, type ToolResult } from "./schemas";
 
 /*
- * Backend: restaurent-agent (FastAPI)
+ * Backend: restaurant-agent (FastAPI)
  *   POST /chat   { message, history: [{role, content}] }
  *                -> { reply, tool_calls: [{name, output}] }
  *   GET  /health -> { status: "ok" }

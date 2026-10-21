@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-// ---- Tool output schemas (mirror restaurent-agent/tools.py) ----
+// ---- Tool output schemas (mirror restaurant-agent/tools.py) ----
 export const RestaurantSummary = z.object({
   name: z.string(),
   rating: z.number(),
